@@ -1,0 +1,581 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Bluetooth PDF / Photo Thermal Printer</title>
+
+  <!-- PDF.js: converts PDF pages into canvas images -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+
+  <style>
+    * {
+      box-sizing: border-box;
+      font-family: Arial, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      padding: 20px;
+      background: #f3f6fb;
+      color: #1f2937;
+    }
+
+    .app {
+      max-width: 900px;
+      margin: auto;
+      background: white;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+    }
+
+    h1 {
+      margin-top: 0;
+      font-size: 24px;
+    }
+
+    .warning {
+      padding: 12px;
+      margin: 15px 0;
+      border-left: 4px solid #f59e0b;
+      border-radius: 8px;
+      background: #fffbeb;
+      color: #92400e;
+      font-size: 14px;
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      gap: 14px;
+      margin: 20px 0;
+    }
+
+    label {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      font-weight: bold;
+      font-size: 14px;
+    }
+
+    input, select, button {
+      padding: 11px;
+      border-radius: 8px;
+      border: 1px solid #cbd5e1;
+      font-size: 15px;
+    }
+
+    button {
+      border: 0;
+      background: #2563eb;
+      color: white;
+      cursor: pointer;
+      font-weight: bold;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    button:disabled {
+      background: #94a3b8;
+      cursor: not-allowed;
+    }
+
+    #printBtn {
+      background: #16a34a;
+    }
+
+    #printBtn:hover {
+      background: #15803d;
+    }
+
+    #status {
+      min-height: 24px;
+      margin: 16px 0;
+      padding: 12px;
+      border-radius: 8px;
+      background: #eff6ff;
+      color: #1d4ed8;
+      font-size: 14px;
+    }
+
+    #previewContainer {
+      margin-top: 18px;
+      border: 1px dashed #94a3b8;
+      border-radius: 12px;
+      padding: 15px;
+      min-height: 120px;
+      overflow-x: auto;
+    }
+
+    .pagePreview {
+      display: inline-block;
+      vertical-align: top;
+      margin: 10px;
+      text-align: center;
+      font-size: 13px;
+    }
+
+    .pagePreview canvas {
+      display: block;
+      max-width: 220px;
+      border: 1px solid #cbd5e1;
+      margin-bottom: 6px;
+      image-rendering: pixelated;
+    }
+
+    .small {
+      font-size: 13px;
+      color: #64748b;
+    }
+  </style>
+</head>
+
+<body>
+  <main class="app">
+    <h1>🖨️ Bluetooth PDF / Photo Thermal Printer</h1>
+
+    <div class="warning">
+      Works with BLE thermal printers that use ESC/POS commands.
+      Use Chrome/Edge on Android, Windows, Linux, or ChromeOS through HTTPS or localhost.
+      Before buying/testing, confirm that your printer supports Bluetooth Low Energy (BLE) and ESC/POS.
+    </div>
+
+    <div class="controls">
+      <label>
+        Upload PDF or Image
+        <input id="fileInput" type="file" accept=".pdf,image/*" />
+      </label>
+
+      <label>
+        Paper Width
+        <select id="paperWidth">
+          <option value="384">58 mm printer — 384 pixels</option>
+          <option value="576">80 mm printer — 576 pixels</option>
+        </select>
+      </label>
+
+      <label>
+        Darkness / Threshold
+        <input id="threshold" type="range" min="50" max="230" value="150" />
+        <span id="thresholdValue">150</span>
+      </label>
+
+      <label>
+        Print Copies
+        <input id="copies" type="number" min="1" max="10" value="1" />
+      </label>
+    </div>
+
+    <div class="controls">
+      <button id="connectBtn">🔵 Connect Bluetooth Printer</button>
+      <button id="prepareBtn" disabled>📄 Prepare / Compress File</button>
+      <button id="printBtn" disabled>🖨️ Print</button>
+    </div>
+
+    <div id="status">Status: Select a file, then connect your printer.</div>
+
+    <div id="previewContainer">
+      <strong>Preview will appear here.</strong>
+      <p class="small">
+        PDF pages are resized to printer width and converted to black-and-white thermal-printer pixels.
+      </p>
+    </div>
+  </main>
+
+  <script>
+    // PDF.js worker configuration
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+
+    let bluetoothDevice = null;
+    let printerCharacteristic = null;
+    let preparedPages = [];
+
+    const fileInput = document.getElementById("fileInput");
+    const paperWidthSelect = document.getElementById("paperWidth");
+    const thresholdInput = document.getElementById("threshold");
+    const thresholdValue = document.getElementById("thresholdValue");
+    const copiesInput = document.getElementById("copies");
+
+    const connectBtn = document.getElementById("connectBtn");
+    const prepareBtn = document.getElementById("prepareBtn");
+    const printBtn = document.getElementById("printBtn");
+
+    const statusBox = document.getElementById("status");
+    const previewContainer = document.getElementById("previewContainer");
+
+    function setStatus(message, isError = false) {
+      statusBox.textContent = "Status: " + message;
+      statusBox.style.background = isError ? "#fef2f2" : "#eff6ff";
+      statusBox.style.color = isError ? "#b91c1c" : "#1d4ed8";
+    }
+
+    thresholdInput.addEventListener("input", () => {
+      thresholdValue.textContent = thresholdInput.value;
+    });
+
+    fileInput.addEventListener("change", () => {
+      prepareBtn.disabled = !fileInput.files.length;
+      printBtn.disabled = true;
+      preparedPages = [];
+      previewContainer.innerHTML =
+        "<strong>File selected.</strong><p class='small'>Click “Prepare / Compress File”.</p>";
+    });
+
+    // Connect using Web Bluetooth.
+    // The printer’s Bluetooth service and write characteristic differ by model.
+    // This scans all BLE devices, then searches their services for a writable characteristic.
+    connectBtn.addEventListener("click", async () => {
+      if (!navigator.bluetooth) {
+        setStatus(
+          "Web Bluetooth is not supported here. Use Chrome or Edge on HTTPS/localhost.",
+          true
+        );
+        return;
+      }
+
+      try {
+        setStatus("Opening Bluetooth device list...");
+
+        bluetoothDevice = await navigator.bluetooth.requestDevice({
+          acceptAllDevices: true,
+          optionalServices: [
+            "000018f0-0000-1000-8000-00805f9b34fb",
+            "0000ffe0-0000-1000-8000-00805f9b34fb",
+            "0000ff00-0000-1000-8000-00805f9b34fb",
+            "0000ae30-0000-1000-8000-00805f9b34fb",
+            "0000abf0-0000-1000-8000-00805f9b34fb"
+          ]
+        });
+
+        bluetoothDevice.addEventListener(
+          "gattserverdisconnected",
+          () => {
+            printerCharacteristic = null;
+            printBtn.disabled = true;
+            connectBtn.textContent = "🔵 Connect Bluetooth Printer";
+            setStatus("Printer disconnected.", true);
+          }
+        );
+
+        setStatus(`Connecting to ${bluetoothDevice.name || "Bluetooth printer"}...`);
+
+        const server = await bluetoothDevice.gatt.connect();
+        const services = await server.getPrimaryServices();
+
+        for (const service of services) {
+          const characteristics = await service.getCharacteristics();
+
+          for (const characteristic of characteristics) {
+            const canWrite =
+              characteristic.properties.write ||
+              characteristic.properties.writeWithoutResponse;
+
+            if (canWrite) {
+              printerCharacteristic = characteristic;
+              break;
+            }
+          }
+
+          if (printerCharacteristic) break;
+        }
+
+        if (!printerCharacteristic) {
+          throw new Error(
+            "No writable Bluetooth characteristic was found. This printer may not be BLE/ESC-POS compatible."
+          );
+        }
+
+        connectBtn.textContent = "✅ Printer Connected";
+        printBtn.disabled = preparedPages.length === 0;
+
+        setStatus(
+          `Connected to ${bluetoothDevice.name || "printer"}. Upload and prepare a PDF/photo.`
+        );
+      } catch (error) {
+        console.error(error);
+        setStatus(error.message || "Bluetooth connection failed.", true);
+      }
+    });
+
+    prepareBtn.addEventListener("click", async () => {
+      const file = fileInput.files[0];
+
+      if (!file) {
+        setStatus("Please select a PDF or image first.", true);
+        return;
+      }
+
+      try {
+        preparedPages = [];
+        previewContainer.innerHTML = "";
+        printBtn.disabled = true;
+
+        const targetWidth = Number(paperWidthSelect.value);
+        const threshold = Number(thresholdInput.value);
+
+        setStatus("Preparing and compressing content for thermal printing...");
+
+        if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+          await preparePdf(file, targetWidth, threshold);
+        } else if (file.type.startsWith("image/")) {
+          await prepareImage(file, targetWidth, threshold);
+        } else {
+          throw new Error("Only PDF and image files are supported.");
+        }
+
+        if (!preparedPages.length) {
+          throw new Error("No printable pages were generated.");
+        }
+
+        printBtn.disabled = !printerCharacteristic;
+        setStatus(
+          `Ready: ${preparedPages.length} page(s) compressed to ${targetWidth}px width.`
+        );
+      } catch (error) {
+        console.error(error);
+        setStatus(error.message || "Could not prepare the file.", true);
+      }
+    });
+
+    async function preparePdf(file, targetWidth, threshold) {
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+
+      for (let pageNo = 1; pageNo <= pdf.numPages; pageNo++) {
+        setStatus(`Compressing PDF page ${pageNo} of ${pdf.numPages}...`);
+
+        const page = await pdf.getPage(pageNo);
+        const originalViewport = page.getViewport({ scale: 1 });
+
+        const scale = targetWidth / originalViewport.width;
+        const viewport = page.getViewport({ scale });
+
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+
+        await page.render({
+          canvasContext: context,
+          viewport
+        }).promise;
+
+        const printData = canvasToEscPosRaster(canvas, targetWidth, threshold);
+        preparedPages.push(printData);
+
+        addPreview(canvas, pageNo);
+      }
+    }
+
+    async function prepareImage(file, targetWidth, threshold) {
+      const imageUrl = URL.createObjectURL(file);
+
+      try {
+        const image = await loadImage(imageUrl);
+
+        const scale = targetWidth / image.width;
+        const newWidth = targetWidth;
+        const newHeight = Math.max(1, Math.round(image.height * scale));
+
+        const canvas = document.createElement("canvas");
+        canvas.width = newWidth;
+        canvas.height = newHeight;
+
+        const context = canvas.getContext("2d", { willReadFrequently: true });
+        context.fillStyle = "white";
+        context.fillRect(0, 0, newWidth, newHeight);
+        context.drawImage(image, 0, 0, newWidth, newHeight);
+
+        const printData = canvasToEscPosRaster(canvas, targetWidth, threshold);
+        preparedPages.push(printData);
+
+        addPreview(canvas, 1);
+      } finally {
+        URL.revokeObjectURL(imageUrl);
+      }
+    }
+
+    function loadImage(src) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error("Could not load image."));
+        image.src = src;
+      });
+    }
+
+    function addPreview(canvas, pageNumber) {
+      const wrapper = document.createElement("div");
+      wrapper.className = "pagePreview";
+
+      const previewCanvas = document.createElement("canvas");
+      const previewWidth = Math.min(220, canvas.width);
+      const previewHeight = Math.round(canvas.height * (previewWidth / canvas.width));
+
+      previewCanvas.width = previewWidth;
+      previewCanvas.height = previewHeight;
+
+      previewCanvas.getContext("2d").drawImage(
+        canvas,
+        0,
+        0,
+        previewWidth,
+        previewHeight
+      );
+
+      const label = document.createElement("div");
+      label.textContent = `Page ${pageNumber}`;
+
+      wrapper.appendChild(previewCanvas);
+      wrapper.appendChild(label);
+      previewContainer.appendChild(wrapper);
+    }
+
+    /*
+      Converts canvas pixels into ESC/POS GS v 0 raster format.
+
+      ESC/POS command:
+      GS v 0 m xL xH yL yH [bitmap data]
+
+      Each byte represents 8 horizontal black/white pixels.
+      Black pixel = bit 1
+      White pixel = bit 0
+    */
+    function canvasToEscPosRaster(canvas, targetWidth, threshold) {
+      const width = canvas.width;
+      const height = canvas.height;
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      const imageData = context.getImageData(0, 0, width, height).data;
+
+      const widthBytes = Math.ceil(width / 8);
+      const rasterData = new Uint8Array(widthBytes * height);
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const pixelIndex = (y * width + x) * 4;
+
+          const red = imageData[pixelIndex];
+          const green = imageData[pixelIndex + 1];
+          const blue = imageData[pixelIndex + 2];
+          const alpha = imageData[pixelIndex + 3];
+
+          // Convert RGB to grayscale
+          const gray = alpha === 0
+            ? 255
+            : Math.round(red * 0.299 + green * 0.587 + blue * 0.114);
+
+          // If dark enough, make it black in thermal print bitmap
+          if (gray < threshold) {
+            const byteIndex = y * widthBytes + Math.floor(x / 8);
+            const bitPosition = 7 - (x % 8);
+            rasterData[byteIndex] |= 1 << bitPosition;
+          }
+        }
+      }
+
+      const xL = widthBytes & 0xff;
+      const xH = (widthBytes >> 8) & 0xff;
+      const yL = height & 0xff;
+      const yH = (height >> 8) & 0xff;
+
+      // ESC @  -> initialize printer
+      // GS v 0 -> print raster image
+      // LF LF LF -> feed paper
+      const initialize = new Uint8Array([0x1b, 0x40]);
+      const rasterHeader = new Uint8Array([
+        0x1d, 0x76, 0x30, 0x00,
+        xL, xH, yL, yH
+      ]);
+      const feedPaper = new Uint8Array([0x0a, 0x0a, 0x0a, 0x0a]);
+
+      return concatUint8Arrays([
+        initialize,
+        rasterHeader,
+        rasterData,
+        feedPaper
+      ]);
+    }
+
+    function concatUint8Arrays(arrays) {
+      const totalLength = arrays.reduce((sum, arr) => sum + arr.length, 0);
+      const result = new Uint8Array(totalLength);
+
+      let offset = 0;
+      for (const array of arrays) {
+        result.set(array, offset);
+        offset += array.length;
+      }
+
+      return result;
+    }
+
+    printBtn.addEventListener("click", async () => {
+      if (!printerCharacteristic) {
+        setStatus("Please connect a Bluetooth printer first.", true);
+        return;
+      }
+
+      if (!preparedPages.length) {
+        setStatus("Please prepare a PDF or image first.", true);
+        return;
+      }
+
+      try {
+        printBtn.disabled = true;
+
+        const copies = Math.min(
+          Math.max(Number(copiesInput.value) || 1, 1),
+          10
+        );
+
+        for (let copy = 1; copy <= copies; copy++) {
+          for (let pageIndex = 0; pageIndex < preparedPages.length; pageIndex++) {
+            setStatus(
+              `Printing copy ${copy}/${copies}, page ${pageIndex + 1}/${preparedPages.length}...`
+            );
+
+            await writeInChunks(preparedPages[pageIndex], 120);
+          }
+        }
+
+        setStatus("✅ Print job sent successfully. Check your printer!");
+      } catch (error) {
+        console.error(error);
+        setStatus(
+          error.message || "Printing failed. Check Bluetooth connection and printer compatibility.",
+          true
+        );
+      } finally {
+        printBtn.disabled = false;
+      }
+    });
+
+    // Bluetooth printers usually have a small packet limit.
+    // Sending chunks avoids failed prints or disconnected devices.
+    async function writeInChunks(data, chunkSize = 120) {
+      for (let offset = 0; offset < data.length; offset += chunkSize) {
+        const chunk = data.slice(offset, offset + chunkSize);
+
+        if (printerCharacteristic.properties.writeWithoutResponse) {
+          await printerCharacteristic.writeValueWithoutResponse(chunk);
+        } else {
+          await printerCharacteristic.writeValue(chunk);
+        }
+
+        // Small delay prevents cheap thermal printers from becoming overwhelmed
+        await sleep(12);
+      }
+    }
+
+    function sleep(ms) {
+      return new Promise(resolve => setTimeout(resolve, ms));
+    }
+  </script>
+</body>
+</html>
